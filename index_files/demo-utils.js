@@ -197,3 +197,21 @@ function tessellate(packed) {
     }
     return result;
 }
+
+function bufferSubData(T, device, destBuffer, destOffset, srcArrayBuffer) {
+    const byteCount = srcArrayBuffer.byteLength;
+    const [srcBuffer, arrayBuffer] = device.createBufferMapped({
+        size: byteCount,
+        usage: GPUBufferUsage.COPY_SRC
+    });
+    new T(arrayBuffer).set(new T(srcArrayBuffer)); // memcpy
+    srcBuffer.unmap();
+
+    const encoder = device.createCommandEncoder();
+    encoder.copyBufferToBuffer(srcBuffer, 0, destBuffer, destOffset, byteCount);
+    const commandBuffer = encoder.finish();
+    const queue = device.getQueue();
+    queue.submit([commandBuffer]);
+
+    srcBuffer.destroy();
+}

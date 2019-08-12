@@ -85,20 +85,32 @@ struct Vertex {
     vec2 uv;
     vec3 norm;
 };
-layout(std430, set = 0, binding = 0) buffer InBufLayout {
+layout(set = 0, binding = 0) uniform Uniforms {
+    uint tessellation;
+} uniforms;
+layout(std430, set = 0, binding = 1) buffer InBufLayout {
     float data[];
 } inBuf;
-layout(std430, set = 0, binding = 1) buffer OutBufLayout {
+layout(std430, set = 0, binding = 2) buffer OutBufLayout {
     float data[];
 } outBuf;
 
-Vertex from_pos(uint pos) {
+Vertex from_pos_in(uint pos) {
+    pos *= 8;
     return Vertex(
-        vec3(inBuf.data[pos], inBuf.data[pos+1], inBuf.data[pos+2]), vec2(inBuf.data[pos+3], inBuf.data[pos+4]), vec3(inBuf.data[pos+5],inBuf.data[pos+6],inBuf.data[pos+7])
+        vec3(inBuf.data[pos], inBuf.data[pos+1], inBuf.data[pos+2]), vec2(inBuf.data[pos+3], inBuf.data[pos+4]), vec3(inBuf.data[pos+5], inBuf.data[pos+6], inBuf.data[pos+7])
+    );
+}
+
+Vertex from_pos_out(uint pos) {
+    pos *= 8;
+    return Vertex(
+        vec3(outBuf.data[pos], outBuf.data[pos+1], outBuf.data[pos+2]), vec2(outBuf.data[pos+3], outBuf.data[pos+4]), vec3(outBuf.data[pos+5], outBuf.data[pos+6], outBuf.data[pos+7])
     );
 }
 
 void write(Vertex v, uint pos) {
+    pos *= 8;
     outBuf.data[pos++] = v.pos.x;
     outBuf.data[pos++] = v.pos.y;
     outBuf.data[pos++] = v.pos.z;
@@ -108,102 +120,86 @@ void write(Vertex v, uint pos) {
     outBuf.data[pos++] = v.norm.y;
     outBuf.data[pos++] = v.norm.z;
 }
+
+uint ipow(uint base, uint exp)
+{
+    uint result = 1;
+    for (;;)
+    {
+        if (exp % 2 == 1)
+            result *= base;
+        exp >>= 1;
+        if (exp == 0)
+            break;
+        base *= base;
+    }
+
+    return result;
+}
  
 void main() {
-    uint index = gl_GlobalInvocationID.x;
- //   if (index >= 106608) { return; }
+    uint start = gl_GlobalInvocationID.x;
+    Vertex t1 = from_pos_in(3 * start);
+    Vertex t2 = from_pos_in(3 * start + 1);
+    Vertex t3 = from_pos_in(3 * start + 2);
 
-    uint tri = index * 3;
-    
-    Vertex t1 = from_pos(tri * 8);
-    Vertex t2 = from_pos((tri+1) * 8);
-    Vertex t3 = from_pos((tri+2) * 8);
+    uint spacing = ipow(4, uniforms.tessellation);
+    write(t1, 3 * spacing * start);
+    write(t2, 3 * spacing * start + 1);
+    write(t3, 3 * spacing * start + 2);
 
-    Vertex m12 = Vertex(
-        (t1.pos + t2.pos) / 2, (t1.uv + t2.uv) / 2, (t1.norm + t2.norm) / 2
-    );
+    uint out_start = spacing * start;
+    uint cur_spacing = spacing;
 
-    Vertex m13 = Vertex(
-        (t1.pos + t3.pos) / 2, (t1.uv + t3.uv) / 2, (t1.norm + t3.norm) / 2
-    );
+    for (uint t = 0; t < uniforms.tessellation; t++) {
+        for (uint i = 0; i < ipow(4, t); i++) {
+            uint read_pos = out_start + i * cur_spacing;
+            Vertex t1 = from_pos_out(3 * read_pos);
+            Vertex t2 = from_pos_out(3 * read_pos + 1);
+            Vertex t3 = from_pos_out(3 * read_pos + 2);
 
-    Vertex m23 = Vertex(
-        (t2.pos + t3.pos) / 2, (t2.uv + t3.uv) / 2, (t2.norm + t3.norm) / 2
-    );
+            Vertex m12 = Vertex(
+                (t1.pos + t2.pos) / 2, (t1.uv + t2.uv) / 2, (t1.norm + t2.norm) / 2
+            );
 
+            Vertex m13 = Vertex(
+                (t1.pos + t3.pos) / 2, (t1.uv + t3.uv) / 2, (t1.norm + t3.norm) / 2
+            );
 
-    // m12 m23 m13
-    // t1 m12 m13
-    // m12 t2 m23
-    // m23 t3 m13
+            Vertex m23 = Vertex(
+                (t2.pos + t3.pos) / 2, (t2.uv + t3.uv) / 2, (t2.norm + t3.norm) / 2
+            );
 
-    uint slot = 4 * tri;
-    write(m12, slot++ * 8);
-    write(m23, slot++ * 8);
-    write(m13, slot++ * 8);
+            // m12 m23 m13
+            // t1 m12 m13
+            // m12 t2 m23
+            // m23 t3 m13
 
-    write(t1, slot++ * 8);
-    write(m12, slot++ * 8);
-    write(m13, slot++ * 8);
+            write(m12, 3 * (read_pos + cur_spacing * 0 / 4) + 0);
+            write(m23, 3 * (read_pos + cur_spacing * 0 / 4) + 1);
+            write(m13, 3 * (read_pos + cur_spacing * 0 / 4) + 2);
 
-    write(m12, slot++ * 8);
-    write(t2, slot++ * 8);
-    write(m23, slot++ * 8);
+            write(t1,  3 * (read_pos + cur_spacing * 1 / 4) + 0);
+            write(m12, 3 * (read_pos + cur_spacing * 1 / 4) + 1);
+            write(m13, 3 * (read_pos + cur_spacing * 1 / 4) + 2);
 
-    write(m23, slot++ * 8);
-    write(t3, slot++ * 8);
-    write(m13, slot++ * 8);
+            write(m12, 3 * (read_pos + cur_spacing * 2 / 4) + 0);
+            write(t2,  3 * (read_pos + cur_spacing * 2 / 4) + 1);
+            write(m23, 3 * (read_pos + cur_spacing * 2 / 4) + 2);
+
+            write(m23, 3 * (read_pos + cur_spacing * 3 / 4) + 0);
+            write(t3,  3 * (read_pos + cur_spacing * 3 / 4) + 1);
+            write(m13, 3 * (read_pos + cur_spacing * 3 / 4) + 2);
+        }
+
+        cur_spacing /= 4;
+    }
 }
 `
 
         const vertexSize = 8 * 4; // Byte size of one vertex.
         const uvOffset = 3 * 4;
         const normalOffset = 5 * 4;
-     /*   const cubeVerticesArray = new Float32Array([
-            // float4 position, float2 uv
-            1, -1, 1, 1, 1, 1,
-            -1, -1, 1, 1, 0, 1,
-            -1, -1, -1, 1, 0, 0,
-            1, -1, -1, 1, 1, 0,
-            1, -1, 1, 1, 1, 1,
-            -1, -1, -1, 1, 0, 0,
-
-            1, 1, 1, 1, 1, 1,
-            1, -1, 1, 1, 0, 1,
-            1, -1, -1, 1, 0, 0,
-            1, 1, -1, 1, 1, 0,
-            1, 1, 1, 1, 1, 1,
-            1, -1, -1, 1, 0, 0,
-
-            -1, 1, 1, 1, 0, 1,
-            1, 1, 1, 1, 1, 1,
-            1, 1, -1, 1, 1, 0,
-            -1, 1, -1, 1, 0, 0,
-            -1, 1, 1, 1, 0, 1,
-            1, 1, -1, 1, 1, 0,
-
-            -1, -1, 1, 1, 0, 1,
-            -1, 1, 1, 1, 1, 1,
-            -1, 1, -1, 1, 1, 0,
-            -1, -1, -1, 1, 0, 0,
-            -1, -1, 1, 1, 0, 1,
-            -1, 1, -1, 1, 1, 0,
-
-            1, 1, 1, 1, 1, 1,
-            -1, 1, 1, 1, 0, 1,
-            -1, -1, 1, 1, 0, 0,
-            -1, -1, 1, 1, 0, 0,
-            1, -1, 1, 1, 1, 0,
-            1, 1, 1, 1, 1, 1,
-
-            1, -1, -1, 1, 1, 0,
-            -1, -1, -1, 1, 0, 0,
-            -1, 1, -1, 1, 0, 1,
-            1, 1, -1, 1, 1, 1,
-            1, -1, -1, 1, 1, 0,
-            -1, 1, -1, 1, 0, 1,
-        ]);*/
-
             
         const params = new URLSearchParams(window.location.search);
         const settings = {
@@ -246,6 +242,7 @@ void main() {
             });
             init();
         }
+
         async function init() {
             window.renderIteration++;
             const curRenderIteration = window.renderIteration;
@@ -258,48 +255,23 @@ void main() {
             for (let vertex of packed) {
                 vertex.position[1] -= 180;
             }
-/*
+
             console.log(packed.length);
-            for(let i = 0; i < settings.tessellation; i++) {
-                packed = tessellate(packed);
-            }
-            console.log(packed.length);*/
+            //for(let i = 0; i < settings.tessellation; i++) {
+            //    packed = tessellate(packed);
+            //}
+            //console.log(packed.length);
 
             if (settings.lines) {
                 packed = asLines(packed);
             }
 
-            const draws = 2;
-            const group = settings.lines ? 2 : 3;
-            let packedPerChunk = packed.length;
-            if (draws > 1) {
-                packedPerChunk = Math.floor(packed.length / (draws-1) / group) * group;
-            }
-            const packedChunks = [];
-            let packedIdx = 0;
-            for (let i = 0; i < draws; i++) {
-                const chunk = []
-                for (let j = 0; j < packedPerChunk; j++) {
-                    if (packedIdx == packed.length) {
-                        chunk.push(packed[packedIdx - 1]);
-                    } else {
-                        chunk.push(packed[packedIdx]);
-                        packedIdx++;
-                    }
-                }
-                packedChunks.push(chunk);
-            }
-
-            const verticesBuffers = [];
-            for (let i = 0; i < draws; i++) {
-                array = new Float32Array(flatten(packedChunks[i]));
-                const verticesBuffer = device.createBuffer({
-                    size: array.byteLength,
-                    usage: GPUBufferUsage.VERTEX | GPUBufferUsage.COPY_DST | GPUBufferUsage.STORAGE
-                });
-                verticesBuffer.setSubData(0, array);
-                verticesBuffers.push(verticesBuffer);
-            }
+            const array = new Float32Array(flatten(packed));
+            const verticesBuffer = device.createBuffer({
+                size: array.byteLength,
+                usage: GPUBufferUsage.VERTEX | GPUBufferUsage.COPY_DST | GPUBufferUsage.STORAGE
+            });
+            bufferSubData(Float32Array, device, verticesBuffer, 0, array);
 
             const bindGroupLayout = device.createBindGroupLayout({
                 bindings: [{
@@ -322,8 +294,9 @@ void main() {
 
             const computeBindGroupLayout = device.createBindGroupLayout({
                 bindings: [
-                { binding: 0, visibility: GPUShaderStage.COMPUTE, type: "storage-buffer" },
+                { binding: 0, visibility: GPUShaderStage.COMPUTE, type: "uniform-buffer" },
                 { binding: 1, visibility: GPUShaderStage.COMPUTE, type: "storage-buffer" },
+                { binding: 2, visibility: GPUShaderStage.COMPUTE, type: "storage-buffer" },
                 ],
             });
             const computePipelineLayout = device.createPipelineLayout({
@@ -338,84 +311,6 @@ void main() {
                 entryPoint: "main",
                 }
             });
-
-            const tessellatedBuffersA = [];
-            const tessellatedBuffersB = [];
-            const computeBindGroupsA = [];
-            const computeBindGroupsB = [];
-            const computeBindGroupsBRead = [];
-            for (let i = 0; i < packedChunks.length; i++) {
-                let bufSize = 4 * 8 * packedChunks[i].length * Math.pow(4, settings.tessellation);
-                tessellatedBuffersA.push(device.createBuffer({
-                    size: bufSize,
-                    usage: GPUBufferUsage.VERTEX | GPUBufferUsage.COPY_DST | GPUBufferUsage.STORAGE
-                }));
-
-                tessellatedBuffersB.push(device.createBuffer({
-                    size: bufSize,
-                    usage: GPUBufferUsage.VERTEX | GPUBufferUsage.COPY_DST | GPUBufferUsage.STORAGE
-                }));
-
-                computeBindGroupsA.push(device.createBindGroup({
-                    layout: computeBindGroupLayout,
-                    bindings: [{
-                        binding: 0,
-                        resource: {
-                        buffer: tessellatedBuffersB[tessellatedBuffersB.length - 1],
-                        offset: 0,
-                        size: tessellatedBuffersB[tessellatedBuffersB.length - 1].byteLength,
-                        },
-                    }, {
-                        binding: 1,
-                        resource: {
-                        buffer: tessellatedBuffersA[tessellatedBuffersA.length - 1],
-                        offset: 0,
-                        size: tessellatedBuffersA[tessellatedBuffersA.length - 1].byteLength,
-                        },
-                    }],
-                }));
-                computeBindGroupsB.push(device.createBindGroup({
-                    layout: computeBindGroupLayout,
-                    bindings: [{
-                        binding: 0,
-                        resource: {
-                        buffer: tessellatedBuffersA[tessellatedBuffersA.length - 1],
-                        offset: 0,
-                        size: tessellatedBuffersA[tessellatedBuffersA.length - 1].byteLength,
-                        },
-                    }, {
-                        binding: 1,
-                        resource: {
-                        buffer: tessellatedBuffersB[tessellatedBuffersB.length - 1],
-                        offset: 0,
-                        size: tessellatedBuffersB[tessellatedBuffersB.length - 1].byteLength,
-                        },
-                    }],
-                }));
-                computeBindGroupsBRead.push(device.createBindGroup({
-                    layout: computeBindGroupLayout,
-                    bindings: [{
-                        binding: 0,
-                        resource: {
-                        buffer: verticesBuffers[i],
-                        offset: 0,
-                        size: verticesBuffers[i].byteLength,
-                        },
-                    }, {
-                        binding: 1,
-                        resource: {
-                        buffer: tessellatedBuffersB[tessellatedBuffersB.length - 1],
-                        offset: 0,
-                        size: tessellatedBuffersB[tessellatedBuffersB.length - 1].byteLength,
-                        },
-                    }],
-                }));
-            }
-/*            const secondBuffer = device.createBuffer({
-                    size: 4 * 8 * 106608,
-                    usage: GPUBufferUsage.VERTEX | GPUBufferUsage.COPY_DST | GPUBufferUsage.STORAGE
-                });*/
-
 
             const pipelineLayout = device.createPipelineLayout({ bindGroupLayouts: [bindGroupLayout] });
             const pipeline = device.createRenderPipeline({
@@ -491,7 +386,7 @@ void main() {
                 usage: GPUBufferUsage.INDIRECT | GPUBufferUsage.COPY_DST,
             });
             
-            indirectBuffer.setSubData(0, new Int32Array([settings.tessellation == 0 ? packedPerChunk : packedPerChunk * Math.pow(4, settings.tessellation), 1, 0, 0]));
+            bufferSubData(Int32Array, device, indirectBuffer, 0, new Int32Array([packed.length * Math.pow(4, settings.tessellation), 1, 0, 0]));
 
             const depthTexture = device.createTexture({
                 size: { width: window.innerWidth, height: window.innerHeight, depth: 1 },
@@ -553,32 +448,55 @@ void main() {
                 return modelViewProjectionMatrix;
             }
 
-            let inGroup = computeBindGroupsA;
-            let outGroup = computeBindGroupsB;
+            let bufSize = 4 * 8 * packed.length * Math.pow(4, settings.tessellation);
+            const tessellatedBuffer = device.createBuffer({
+                size: bufSize,
+                usage: GPUBufferUsage.VERTEX | GPUBufferUsage.COPY_DST | GPUBufferUsage.STORAGE
+            });
 
-            const commandEncoder = device.createCommandEncoder({});
+            const computeUniformBuffer = device.createBuffer({
+                size: 4,
+                usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
+            });
+
+            const computeTessellateBindGroup = device.createBindGroup({
+                layout: computeBindGroupLayout,
+                bindings: [{
+                    binding: 0,
+                    resource: {
+                        buffer: computeUniformBuffer,
+                        offset: 0,
+                        size: 4,
+                    },
+                }, {
+                    binding: 1,
+                    resource: {
+                    buffer: verticesBuffer,
+                    offset: 0,
+                    size: verticesBuffer.byteLength,
+                    },
+                }, {
+                    binding: 2,
+                    resource: {
+                    buffer: tessellatedBuffer,
+                    offset: 0,
+                    size: tessellatedBuffer.byteLength,
+                    },
+                }],
+            });
+
             {
-                for (let t = 0; t < settings.tessellation; t++) {
-                    const passEncoder = commandEncoder.beginComputePass();
-                    for (let i = 0; i < packedChunks.length; i++) {
-                        passEncoder.setPipeline(computePipeline);
-                        if (t == 0) {
-                            passEncoder.setBindGroup(0, computeBindGroupsBRead[i]);
-                        } else {
-                            passEncoder.setBindGroup(0, outGroup[i]);
-                        }
-                        const num_tris = packedChunks[i].length / 3 * Math.pow(4, t);
-                        passEncoder.dispatch(num_tris);
-                    }
-                    passEncoder.endPass();
-
-                    let tempGroup = inGroup;
-                    inGroup = outGroup;
-                    outGroup = tempGroup;
-                }
+                computeUniformBuffer.setSubData(0, new Uint32Array([settings.tessellation]));
+                const commandEncoder = device.createCommandEncoder({});
+                const passEncoder = commandEncoder.beginComputePass();
+                passEncoder.setPipeline(computePipeline);
+                passEncoder.setBindGroup(0, computeTessellateBindGroup);
+                const num_tris = packed.length / 3;
+                passEncoder.dispatch(num_tris);
+                passEncoder.endPass();
+                device.getQueue().submit([commandEncoder.finish()]);
             }
 
-            device.getQueue().submit([commandEncoder.finish()]);
 
 
             function frame() {
@@ -597,14 +515,9 @@ void main() {
                 const passEncoder = commandEncoder.beginRenderPass(renderPassDescriptor);
                 passEncoder.setPipeline(pipeline);
                 passEncoder.setBindGroup(0, uniformBindGroup);
-                let out_buffer = inGroup == computeBindGroupsA ? tessellatedBuffersA : tessellatedBuffersB;
-                if (settings.tessellation == 0) {
-                    out_buffer = verticesBuffers;
-                }
-                for (let i = 0; i < packedChunks.length; i++) {
-                    passEncoder.setVertexBuffers(0, [out_buffer[i]], [0]);
-                    passEncoder.drawIndirect(indirectBuffer, 0);
-                }
+                passEncoder.setVertexBuffers(0, [tessellatedBuffer], [0]);
+                passEncoder.drawIndirect(indirectBuffer, 0);
+            
                 passEncoder.endPass();
 
                 device.getQueue().submit([commandEncoder.finish()]);
