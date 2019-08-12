@@ -79,6 +79,83 @@ void main() {
 }
 `
 
+const computeShaderGLSL = `#version 450
+struct Vertex {
+    vec3 pos;
+    vec2 uv;
+    vec3 norm;
+};
+layout(std430, set = 0, binding = 0) buffer InBufLayout {
+    float data[];
+} inBuf;
+layout(std430, set = 0, binding = 1) buffer OutBufLayout {
+    float data[];
+} outBuf;
+
+Vertex from_pos(uint pos) {
+    return Vertex(
+        vec3(inBuf.data[pos], inBuf.data[pos+1], inBuf.data[pos+2]), vec2(inBuf.data[pos+3], inBuf.data[pos+4]), vec3(inBuf.data[pos+5],inBuf.data[pos+6],inBuf.data[pos+7])
+    );
+}
+
+void write(Vertex v, uint pos) {
+    outBuf.data[pos++] = v.pos.x;
+    outBuf.data[pos++] = v.pos.y;
+    outBuf.data[pos++] = v.pos.z;
+    outBuf.data[pos++] = v.uv.s;
+    outBuf.data[pos++] = v.uv.t;
+    outBuf.data[pos++] = v.norm.x;
+    outBuf.data[pos++] = v.norm.y;
+    outBuf.data[pos++] = v.norm.z;
+}
+ 
+void main() {
+    uint index = gl_GlobalInvocationID.x;
+ //   if (index >= 106608) { return; }
+
+    uint tri = index * 3;
+    
+    Vertex t1 = from_pos(tri * 8);
+    Vertex t2 = from_pos((tri+1) * 8);
+    Vertex t3 = from_pos((tri+2) * 8);
+
+    Vertex m12 = Vertex(
+        (t1.pos + t2.pos) / 2, (t1.uv + t2.uv) / 2, (t1.norm + t2.norm) / 2
+    );
+
+    Vertex m13 = Vertex(
+        (t1.pos + t3.pos) / 2, (t1.uv + t3.uv) / 2, (t1.norm + t3.norm) / 2
+    );
+
+    Vertex m23 = Vertex(
+        (t2.pos + t3.pos) / 2, (t2.uv + t3.uv) / 2, (t2.norm + t3.norm) / 2
+    );
+
+
+    // m12 m23 m13
+    // t1 m12 m13
+    // m12 t2 m23
+    // m23 t3 m13
+
+    uint slot = 4 * tri;
+    write(m12, slot++ * 8);
+    write(m23, slot++ * 8);
+    write(m13, slot++ * 8);
+
+    write(t1, slot++ * 8);
+    write(m12, slot++ * 8);
+    write(m13, slot++ * 8);
+
+    write(m12, slot++ * 8);
+    write(t2, slot++ * 8);
+    write(m23, slot++ * 8);
+
+    write(m23, slot++ * 8);
+    write(t3, slot++ * 8);
+    write(m13, slot++ * 8);
+}
+`
+
         const vertexSize = 8 * 4; // Byte size of one vertex.
         const uvOffset = 3 * 4;
         const normalOffset = 5 * 4;
@@ -133,13 +210,11 @@ void main() {
             displacement: 1.0,
             tessellation: 0,
             lines: false,
-            //numTriangles: Number(params.get('numTriangles')) || 20000,
             //reuseCommandBuffers: Boolean(params.get('reuseCommandBuffers')),
-            //dynamicOffsets: Boolean(params.get('dynamicOffsets')),
         };
         const gui = new dat.GUI();
         gui.add(settings, 'displacement', 0, 10);
-        gui.add(settings, 'tessellation', 0, 10).step(1).onFinishChange(init);
+        gui.add(settings, 'tessellation', 0, 4).step(1).onFinishChange(init);
         gui.add(settings, 'lines').onFinishChange(init);
 
         window.renderIteration = 0;
@@ -183,20 +258,48 @@ void main() {
             for (let vertex of packed) {
                 vertex.position[1] -= 180;
             }
-
+/*
+            console.log(packed.length);
             for(let i = 0; i < settings.tessellation; i++) {
                 packed = tessellate(packed);
             }
+            console.log(packed.length);*/
 
-            const flat = flatten(settings.lines ? asLines(packed) : packed);
+            if (settings.lines) {
+                packed = asLines(packed);
+            }
 
-            const cubeVerticesArray = new Float32Array(flat);
+            const draws = 2;
+            const group = settings.lines ? 2 : 3;
+            let packedPerChunk = packed.length;
+            if (draws > 1) {
+                packedPerChunk = Math.floor(packed.length / (draws-1) / group) * group;
+            }
+            const packedChunks = [];
+            let packedIdx = 0;
+            for (let i = 0; i < draws; i++) {
+                const chunk = []
+                for (let j = 0; j < packedPerChunk; j++) {
+                    if (packedIdx == packed.length) {
+                        chunk.push(packed[packedIdx - 1]);
+                    } else {
+                        chunk.push(packed[packedIdx]);
+                        packedIdx++;
+                    }
+                }
+                packedChunks.push(chunk);
+            }
 
-            const verticesBuffer = device.createBuffer({
-                size: cubeVerticesArray.byteLength,
-                usage: GPUBufferUsage.VERTEX | GPUBufferUsage.COPY_DST
-            });
-            verticesBuffer.setSubData(0, cubeVerticesArray);
+            const verticesBuffers = [];
+            for (let i = 0; i < draws; i++) {
+                array = new Float32Array(flatten(packedChunks[i]));
+                const verticesBuffer = device.createBuffer({
+                    size: array.byteLength,
+                    usage: GPUBufferUsage.VERTEX | GPUBufferUsage.COPY_DST | GPUBufferUsage.STORAGE
+                });
+                verticesBuffer.setSubData(0, array);
+                verticesBuffers.push(verticesBuffer);
+            }
 
             const bindGroupLayout = device.createBindGroupLayout({
                 bindings: [{
@@ -217,6 +320,103 @@ void main() {
                 }]
             });
 
+            const computeBindGroupLayout = device.createBindGroupLayout({
+                bindings: [
+                { binding: 0, visibility: GPUShaderStage.COMPUTE, type: "storage-buffer" },
+                { binding: 1, visibility: GPUShaderStage.COMPUTE, type: "storage-buffer" },
+                ],
+            });
+            const computePipelineLayout = device.createPipelineLayout({
+                bindGroupLayouts: [computeBindGroupLayout],
+            });
+            const computePipeline = device.createComputePipeline({
+                layout: computePipelineLayout,
+                computeStage: {
+                module: device.createShaderModule({
+                    code: Utils.compile("c", computeShaderGLSL)
+                }),
+                entryPoint: "main",
+                }
+            });
+
+            const tessellatedBuffersA = [];
+            const tessellatedBuffersB = [];
+            const computeBindGroupsA = [];
+            const computeBindGroupsB = [];
+            const computeBindGroupsBRead = [];
+            for (let i = 0; i < packedChunks.length; i++) {
+                let bufSize = 4 * 8 * packedChunks[i].length * Math.pow(4, settings.tessellation);
+                tessellatedBuffersA.push(device.createBuffer({
+                    size: bufSize,
+                    usage: GPUBufferUsage.VERTEX | GPUBufferUsage.COPY_DST | GPUBufferUsage.STORAGE
+                }));
+
+                tessellatedBuffersB.push(device.createBuffer({
+                    size: bufSize,
+                    usage: GPUBufferUsage.VERTEX | GPUBufferUsage.COPY_DST | GPUBufferUsage.STORAGE
+                }));
+
+                computeBindGroupsA.push(device.createBindGroup({
+                    layout: computeBindGroupLayout,
+                    bindings: [{
+                        binding: 0,
+                        resource: {
+                        buffer: tessellatedBuffersB[tessellatedBuffersB.length - 1],
+                        offset: 0,
+                        size: tessellatedBuffersB[tessellatedBuffersB.length - 1].byteLength,
+                        },
+                    }, {
+                        binding: 1,
+                        resource: {
+                        buffer: tessellatedBuffersA[tessellatedBuffersA.length - 1],
+                        offset: 0,
+                        size: tessellatedBuffersA[tessellatedBuffersA.length - 1].byteLength,
+                        },
+                    }],
+                }));
+                computeBindGroupsB.push(device.createBindGroup({
+                    layout: computeBindGroupLayout,
+                    bindings: [{
+                        binding: 0,
+                        resource: {
+                        buffer: tessellatedBuffersA[tessellatedBuffersA.length - 1],
+                        offset: 0,
+                        size: tessellatedBuffersA[tessellatedBuffersA.length - 1].byteLength,
+                        },
+                    }, {
+                        binding: 1,
+                        resource: {
+                        buffer: tessellatedBuffersB[tessellatedBuffersB.length - 1],
+                        offset: 0,
+                        size: tessellatedBuffersB[tessellatedBuffersB.length - 1].byteLength,
+                        },
+                    }],
+                }));
+                computeBindGroupsBRead.push(device.createBindGroup({
+                    layout: computeBindGroupLayout,
+                    bindings: [{
+                        binding: 0,
+                        resource: {
+                        buffer: verticesBuffers[i],
+                        offset: 0,
+                        size: verticesBuffers[i].byteLength,
+                        },
+                    }, {
+                        binding: 1,
+                        resource: {
+                        buffer: tessellatedBuffersB[tessellatedBuffersB.length - 1],
+                        offset: 0,
+                        size: tessellatedBuffersB[tessellatedBuffersB.length - 1].byteLength,
+                        },
+                    }],
+                }));
+            }
+/*            const secondBuffer = device.createBuffer({
+                    size: 4 * 8 * 106608,
+                    usage: GPUBufferUsage.VERTEX | GPUBufferUsage.COPY_DST | GPUBufferUsage.STORAGE
+                });*/
+
+
             const pipelineLayout = device.createPipelineLayout({ bindGroupLayouts: [bindGroupLayout] });
             const pipeline = device.createRenderPipeline({
                 layout: pipelineLayout,
@@ -234,7 +434,7 @@ void main() {
                     entryPoint: "main"
                 },
 
-                primitiveTopology: settings.lines ? "line-list" : "triangle-list",
+                primitiveTopology: settings.lines ? "line-list" : "line-list",
                 depthStencilState: {
                     depthWriteEnabled: true,
                     depthCompare: "less",
@@ -291,7 +491,7 @@ void main() {
                 usage: GPUBufferUsage.INDIRECT | GPUBufferUsage.COPY_DST,
             });
             
-            indirectBuffer.setSubData(0, new Int32Array([flat.length / 8, 1, 0, 0]));
+            indirectBuffer.setSubData(0, new Int32Array([settings.tessellation == 0 ? packedPerChunk : packedPerChunk * Math.pow(4, settings.tessellation), 1, 0, 0]));
 
             const depthTexture = device.createTexture({
                 size: { width: window.innerWidth, height: window.innerHeight, depth: 1 },
@@ -353,6 +553,34 @@ void main() {
                 return modelViewProjectionMatrix;
             }
 
+            let inGroup = computeBindGroupsA;
+            let outGroup = computeBindGroupsB;
+
+            const commandEncoder = device.createCommandEncoder({});
+            {
+                for (let t = 0; t < settings.tessellation; t++) {
+                    const passEncoder = commandEncoder.beginComputePass();
+                    for (let i = 0; i < packedChunks.length; i++) {
+                        passEncoder.setPipeline(computePipeline);
+                        if (t == 0) {
+                            passEncoder.setBindGroup(0, computeBindGroupsBRead[i]);
+                        } else {
+                            passEncoder.setBindGroup(0, outGroup[i]);
+                        }
+                        const num_tris = packedChunks[i].length / 3 * Math.pow(4, t);
+                        passEncoder.dispatch(num_tris);
+                    }
+                    passEncoder.endPass();
+
+                    let tempGroup = inGroup;
+                    inGroup = outGroup;
+                    outGroup = tempGroup;
+                }
+            }
+
+            device.getQueue().submit([commandEncoder.finish()]);
+
+
             function frame() {
                 if (curRenderIteration != window.renderIteration) {
                     return;
@@ -362,12 +590,21 @@ void main() {
                 uniformBuffer.setSubData(4*16, new Float32Array([settings.displacement]));
                 renderPassDescriptor.colorAttachments[0].attachment = swapChain.getCurrentTexture().createDefaultView();
 
+                // two compute passes 
+                // 1) decide how many to tessellate and write indirect draw call
+                // 2) do tessellation all in one, dispatch = # tris
                 const commandEncoder = device.createCommandEncoder({});
                 const passEncoder = commandEncoder.beginRenderPass(renderPassDescriptor);
                 passEncoder.setPipeline(pipeline);
                 passEncoder.setBindGroup(0, uniformBindGroup);
-                passEncoder.setVertexBuffers(0, [verticesBuffer], [0]);
-                passEncoder.drawIndirect(indirectBuffer, 0);
+                let out_buffer = inGroup == computeBindGroupsA ? tessellatedBuffersA : tessellatedBuffersB;
+                if (settings.tessellation == 0) {
+                    out_buffer = verticesBuffers;
+                }
+                for (let i = 0; i < packedChunks.length; i++) {
+                    passEncoder.setVertexBuffers(0, [out_buffer[i]], [0]);
+                    passEncoder.drawIndirect(indirectBuffer, 0);
+                }
                 passEncoder.endPass();
 
                 device.getQueue().submit([commandEncoder.finish()]);
