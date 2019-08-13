@@ -74,7 +74,6 @@ layout(location = 1) in vec3 fragNormal;
 layout(location = 0) out vec4 outColor;
 
 void main() {
-    //outColor = vec4(fragNormal, 1);
     outColor =  texture(sampler2D(myTexture, mySampler), fragUV);
 }
 `
@@ -196,22 +195,49 @@ void main() {
     }
 }
 `
+            
+        var eyePt = vec3.fromValues(0.0, 0.0, 65.0);
+        var viewDir = vec3.fromValues(0.0, 0.0, -1.0);
+        var up = vec3.fromValues(0.0, 1.0, 0.0);
+        var viewPt = vec3.fromValues(0.0, 0.0, 0.0);
+
+        /** @global Rotation around up */
+        var upRot = quat.create();
+        /** @global Rotation around right */
+        var rightRot = quat.create();
+        /** @global Final change in rotation */
+        var finalRot = quat.create();
+        /** @global Direction of up in world coordinates */
+        var upDir = vec3.fromValues(0.0, 1.0, 0.0);
+        /** @global Direction of right in world coordinates */
+        var rightDir = vec3.fromValues(1.0, 0.0, 0.0);
+        /** @global Scaled version of viewDir for movement */
+        var viewDirScaled = vec3.fromValues(0.0, 0.0, -1.0);
+        /** @global Scaled version of rightDir for movement */
+        var rightDirScaled = vec3.fromValues(1.0, 0.0, 0.0);
+        /** @global Scaled version of rightDir for movement */
+        var upDirScaled = vec3.fromValues(0.0, 1.0, 0.0);
 
         const vertexSize = 8 * 4; // Byte size of one vertex.
         const uvOffset = 3 * 4;
         const normalOffset = 5 * 4;
+
+        let aspect = Math.abs(window.innerWidth / window.innerHeight);
+        let fov = 60;
             
         const params = new URLSearchParams(window.location.search);
         const settings = {
-            displacement: 1.0,
+            displacement: 5.0,
             tessellation: 0,
             lines: false,
+            freeze: false,
             //reuseCommandBuffers: Boolean(params.get('reuseCommandBuffers')),
         };
         const gui = new dat.GUI();
         gui.add(settings, 'displacement', 0, 10);
         gui.add(settings, 'tessellation', 0, 4).step(1).onFinishChange(init);
         gui.add(settings, 'lines').onFinishChange(init);
+        gui.add(settings, 'freeze');
 
         window.renderIteration = 0;
 
@@ -230,9 +256,9 @@ void main() {
 
             window.canvas = document.querySelector('canvas');
 
-            const aspect = Math.abs(window.innerWidth / window.innerHeight);
+            aspect = Math.abs(window.innerWidth / window.innerHeight);
             window.projectionMatrix = mat4.create();
-            mat4.perspective(projectionMatrix, (2 * Math.PI) / 5, -aspect, 1, 100.0);
+            mat4.perspective(projectionMatrix, degToRad(fov), -aspect, 0.01, 100.0);
 
             window.context = canvas.getContext('gpupresent');
 
@@ -253,18 +279,18 @@ void main() {
             }
 
             for (let vertex of packed) {
-                vertex.position[1] -= 180;
+                vertex.position[1] -= 175;
             }
 
-            console.log(packed.length);
+            //console.log(packed.length);
             //for(let i = 0; i < settings.tessellation; i++) {
             //    packed = tessellate(packed);
             //}
             //console.log(packed.length);
 
-            if (settings.lines) {
-                packed = asLines(packed);
-            }
+            //if (settings.lines) {
+            //    packed = asLines(packed);
+            //}
 
             const array = new Float32Array(flatten(packed));
             const verticesBuffer = device.createBuffer({
@@ -329,7 +355,7 @@ void main() {
                     entryPoint: "main"
                 },
 
-                primitiveTopology: settings.lines ? "line-list" : "line-list",
+                primitiveTopology: settings.lines ? "line-list" : "triangle-list",
                 depthStencilState: {
                     depthWriteEnabled: true,
                     depthCompare: "less",
@@ -381,13 +407,6 @@ void main() {
                 usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
             });
 
-            const indirectBuffer = device.createBuffer({
-                size: 4 * 4,
-                usage: GPUBufferUsage.INDIRECT | GPUBufferUsage.COPY_DST,
-            });
-            
-            bufferSubData(Int32Array, device, indirectBuffer, 0, new Int32Array([packed.length * Math.pow(4, settings.tessellation), 1, 0, 0]));
-
             const depthTexture = device.createTexture({
                 size: { width: window.innerWidth, height: window.innerHeight, depth: 1 },
                 arrayLayerCount: 1,
@@ -436,19 +455,8 @@ void main() {
                 }],
             });
 
-            function getTransformationMatrix() {
-                let viewMatrix = mat4.create();
-                mat4.translate(viewMatrix, viewMatrix, vec3.fromValues(0, 0, -40));
-                let now = Date.now() / 1000;
-                mat4.rotate(viewMatrix, viewMatrix, Math.cos(now), vec3.fromValues(0, 1, 0));
-
-                let modelViewProjectionMatrix = mat4.create();
-                mat4.multiply(modelViewProjectionMatrix, projectionMatrix, viewMatrix);
-
-                return modelViewProjectionMatrix;
-            }
-
-            let bufSize = 4 * 8 * packed.length * Math.pow(4, settings.tessellation);
+            // max tessellation = 4
+            let bufSize = 4 * 8 * packed.length * Math.pow(4, 4);
             const tessellatedBuffer = device.createBuffer({
                 size: bufSize,
                 usage: GPUBufferUsage.VERTEX | GPUBufferUsage.COPY_DST | GPUBufferUsage.STORAGE
@@ -485,25 +493,158 @@ void main() {
                 }],
             });
 
-            {
-                computeUniformBuffer.setSubData(0, new Uint32Array([settings.tessellation]));
-                const commandEncoder = device.createCommandEncoder({});
-                const passEncoder = commandEncoder.beginComputePass();
-                passEncoder.setPipeline(computePipeline);
-                passEncoder.setBindGroup(0, computeTessellateBindGroup);
-                const num_tris = packed.length / 3;
-                passEncoder.dispatch(num_tris);
-                passEncoder.endPass();
-                device.getQueue().submit([commandEncoder.finish()]);
+            const currentlyPressedKeys = {};
+
+            // Key down watcher
+            function handleKeyDown(event) {
+                var k = event.key.toLowerCase();
+                currentlyPressedKeys[k] = true;
+                if (k == "arrowup" || k == "arrowleft" || k == "arrowright" || k == "arrowdown") {
+                    event.preventDefault();
+                }
             }
 
+            // Key up watcher
+            function handleKeyUp(event) {
+                currentlyPressedKeys[event.key.toLowerCase()] = false;
+            }
 
+            // Free camera movement
+            function freecamMovement(deltaTime) {
+                // Rotation speeds
+                var rotDegPerSec = 90;
+                var rotRadPerSec = degToRad(rotDegPerSec);
+                vec3.scale(viewDirScaled, viewDir, 20 * deltaTime);
+                vec3.scale(rightDirScaled, rightDir, 20 * deltaTime);
+                vec3.scale(upDirScaled, vec3.fromValues(0.0, 1.0, 0.0), 20 * deltaTime);
+
+                // Move eye relative to forward
+                if (currentlyPressedKeys["w"]) {
+                    vec3.add(eyePt, eyePt, viewDirScaled);
+                }
+                if (currentlyPressedKeys["s"]) {
+                    vec3.sub(eyePt, eyePt, viewDirScaled);
+                }
+                if (currentlyPressedKeys["d"]) {
+                    vec3.sub(eyePt, eyePt, rightDirScaled);
+                }
+                if (currentlyPressedKeys["a"]) {
+                    vec3.add(eyePt, eyePt, rightDirScaled);
+                }
+                if (currentlyPressedKeys[" "]) {
+                    vec3.sub(eyePt, eyePt, upDirScaled);
+                }
+                if (currentlyPressedKeys["shift"]) {
+                    vec3.add(eyePt, eyePt, upDirScaled);
+                }
+                if (currentlyPressedKeys["f"]) {
+                    fov += 20 * deltaTime;
+                    mat4.perspective(projectionMatrix, degToRad(fov), -aspect, 0.01, 100.0);
+                }
+                if (currentlyPressedKeys["r"]) {
+                    fov -= 20 * deltaTime;
+                    mat4.perspective(projectionMatrix, degToRad(fov), -aspect, 0.01, 100.0);
+                }
+
+                // Rotate eye freely
+                var upAmt = 0;
+                var rightAmt = 0;
+                if (currentlyPressedKeys["arrowright"]) {
+                    upAmt += 0.8 * rotRadPerSec * deltaTime;
+                }
+                if (currentlyPressedKeys["arrowleft"]) {
+                    upAmt -= 0.8 * rotRadPerSec * deltaTime;
+                }
+                if (currentlyPressedKeys["arrowdown"]) {
+                    rightAmt += 0.8 * rotRadPerSec * deltaTime;
+                }
+                if (currentlyPressedKeys["arrowup"]) {
+                    rightAmt -= 0.8 * rotRadPerSec * deltaTime;
+                }
+
+                // Quaternion rotation for eye
+                quat.setAxisAngle(upRot, [0, 1, 0], upAmt);
+                quat.setAxisAngle(rightRot, rightDir, rightAmt);
+                quat.identity(finalRot);
+                quat.mul(finalRot, upRot, finalRot);
+                quat.mul(finalRot, rightRot, finalRot);
+                vec3.transformQuat(viewDir, viewDir, finalRot);
+                vec3.transformQuat(upDir, upDir, finalRot);
+                vec3.transformQuat(rightDir, rightDir, finalRot);
+            }
+
+            function getTransformationMatrix() {
+                const vMatrix = mat4.create();
+                vec3.add(viewPt, eyePt, viewDir);
+                mat4.lookAt(vMatrix, eyePt, viewPt, up);
+                let modelViewProjectionMatrix = mat4.create();
+                mat4.multiply(modelViewProjectionMatrix, projectionMatrix, vMatrix);
+                return modelViewProjectionMatrix;
+                /*
+                let viewMatrix = mat4.create();
+                mat4.translate(viewMatrix, viewMatrix, vec3.fromValues(0, 0, -40));
+                let now = Date.now() / 1000;
+                mat4.rotate(viewMatrix, viewMatrix, Math.cos(now), vec3.fromValues(0, 1, 0));
+
+                let modelViewProjectionMatrix = mat4.create();
+                mat4.multiply(modelViewProjectionMatrix, projectionMatrix, viewMatrix);
+
+                return modelViewProjectionMatrix;*/
+            }
+
+            let lastTime = Date.now() / 1000;
+
+            const initialEye = vec3.clone(eyePt);
+
+            const closeLOD = 20;
+            const farLOD = 60;
+
+            let lastTessellation = -1;
+
+            const indirectBuffer = device.createBuffer({
+                size: 4 * 4,
+                usage: GPUBufferUsage.INDIRECT | GPUBufferUsage.COPY_DST,
+            });
+            
+            //bufferSubData(Int32Array, device, indirectBuffer, 0, new Int32Array([packed.length * Math.pow(4, settings.tessellation), 1, 0, 0]));
 
             function frame() {
                 if (curRenderIteration != window.renderIteration) {
                     return;
                 }
-                let now = Date.now() / 1000;
+
+                const now = Date.now() / 1000;
+                const deltaTime = now - lastTime;
+                lastTime = now;
+
+                freecamMovement(deltaTime);
+
+                let tessellation = Math.ceil((eyePt[2] - closeLOD) / (farLOD - closeLOD) * 4);
+                if (tessellation < 0) {
+                    tessellation = 0;
+                }
+                if (tessellation > 4) {
+                    tessellation = 4;
+                }
+                tessellation = 4 - tessellation;
+                //console.log(tessellation);
+
+                if (lastTessellation != tessellation && !settings.freeze) {
+                    computeUniformBuffer.setSubData(0, new Uint32Array([tessellation]));
+                    const commandEncoder = device.createCommandEncoder({});
+                    const passEncoder = commandEncoder.beginComputePass();
+                    passEncoder.setPipeline(computePipeline);
+                    passEncoder.setBindGroup(0, computeTessellateBindGroup);
+                    const num_tris = packed.length / 3;
+                    passEncoder.dispatch(num_tris);
+                    passEncoder.endPass();
+                    device.getQueue().submit([commandEncoder.finish()]);
+            
+                    bufferSubData(Int32Array, device, indirectBuffer, 0, new Int32Array([packed.length * Math.pow(4, tessellation), 1, 0, 0]));
+
+                    lastTessellation = tessellation;
+                }
+
                 uniformBuffer.setSubData(0, getTransformationMatrix());
                 uniformBuffer.setSubData(4*16, new Float32Array([settings.displacement]));
                 renderPassDescriptor.colorAttachments[0].attachment = swapChain.getCurrentTexture().createDefaultView();
@@ -525,12 +666,14 @@ void main() {
                 requestAnimationFrame(frame);
             }
 
+            document.onkeydown = handleKeyDown;
+            document.onkeyup = handleKeyUp;
+
             requestAnimationFrame(frame);
         }
 
         window.addEventListener('resize', onResize, false);
         onResize();
-        start();
 
     </script>
     <!--

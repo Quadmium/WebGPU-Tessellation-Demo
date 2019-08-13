@@ -215,3 +215,7 @@ function bufferSubData(T, device, destBuffer, destOffset, srcArrayBuffer) {
 
     srcBuffer.destroy();
 }
+
+function degToRad(degrees) {
+    return degrees * Math.PI / 180;
+}
