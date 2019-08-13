@@ -2,7 +2,7 @@
 <!-- saved from url=(0061)https://austineng.github.io/webgpu-samples/textured_cube.html -->
 <html><head><meta http-equiv="Content-Type" content="text/html; charset=UTF-8">
     <meta name="viewport" content="width=600">
-    <title>WebGPU Textured Cube demo</title>
+    <title>WebGPU Tessellation demo</title>
     <script src="./index_files/gl-matrix-min.js"></script>
     <script src="./index_files/utils.js"></script>
     <script src="./index_files/demo-utils.js"></script>
@@ -85,7 +85,9 @@ struct Vertex {
     vec3 norm;
 };
 layout(set = 0, binding = 0) uniform Uniforms {
-    uint tessellation;
+    float z;
+    int numTriangles;
+    int tessellation;
 } uniforms;
 layout(std430, set = 0, binding = 1) buffer InBufLayout {
     float data[];
@@ -193,6 +195,68 @@ void main() {
 
         cur_spacing /= 4;
     }
+}
+`
+const statefulComputeShaderGLSL = `#version 450
+layout(std430, set = 0, binding = 0) buffer InBufLayout {
+    // Positions are overridden by caller
+    float z;
+    int numTriangles;
+    // Tessellation is managed by the shader
+    int curTessellation;
+} inBuf;
+layout(std430, set = 0, binding = 1) buffer OutBufLayout {
+    float z;
+    int numTriangles;
+    int curTessellation;
+} outBuf;
+layout(std430, set = 0, binding = 2) buffer OutIndirectBufLayout {
+    // Indirect command execution if desired
+    uint x;
+    uint y;
+    uint z;
+} outIndirectBuf;
+layout(std430, set = 0, binding = 3) buffer OutDrawIndirectBufLayout {
+    // Indirect command execution if desired
+    uint a;
+    uint b;
+    uint c;
+    uint d;
+} outDrawIndirectBuf;
+
+uint ipow(uint base, uint exp)
+{
+    uint result = 1;
+    for (;;)
+    {
+        if (exp % 2 == 1)
+            result *= base;
+        exp >>= 1;
+        if (exp == 0)
+            break;
+        base *= base;
+    }
+
+    return result;
+}
+ 
+void main() {
+    float closeLOD = 20;
+    float farLOD = 60;
+    outBuf.curTessellation = 4 - int(clamp(ceil((inBuf.z - closeLOD) / (farLOD - closeLOD) * 4), 0, 4));
+    if (outBuf.curTessellation != inBuf.curTessellation) {
+        outIndirectBuf.x = inBuf.numTriangles;
+        outIndirectBuf.y = 1;
+        outIndirectBuf.z = 1;
+    } else {
+        outIndirectBuf.x = 0;
+        outIndirectBuf.y = 0;
+        outIndirectBuf.z = 0;
+    }
+    outDrawIndirectBuf.a = inBuf.numTriangles * 3 * ipow(4, outBuf.curTessellation);
+    outDrawIndirectBuf.b = 1;
+    outDrawIndirectBuf.c = 0;
+    outDrawIndirectBuf.d = 0;
 }
 `
             
@@ -338,6 +402,28 @@ void main() {
                 }
             });
 
+
+            const statefulComputeBindGroupLayout = device.createBindGroupLayout({
+                bindings: [
+                { binding: 0, visibility: GPUShaderStage.COMPUTE, type: "storage-buffer" },
+                { binding: 1, visibility: GPUShaderStage.COMPUTE, type: "storage-buffer" },
+                { binding: 2, visibility: GPUShaderStage.COMPUTE, type: "storage-buffer" },
+                { binding: 3, visibility: GPUShaderStage.COMPUTE, type: "storage-buffer" },
+                ],
+            });
+            const statefulComputePipelineLayout = device.createPipelineLayout({
+                bindGroupLayouts: [statefulComputeBindGroupLayout],
+            });
+            const statefulComputePipeline = device.createComputePipeline({
+                layout: statefulComputePipelineLayout,
+                computeStage: {
+                module: device.createShaderModule({
+                    code: Utils.compile("c", statefulComputeShaderGLSL)
+                }),
+                entryPoint: "main",
+                }
+            });
+
             const pipelineLayout = device.createPipelineLayout({ bindGroupLayouts: [bindGroupLayout] });
             const pipeline = device.createRenderPipeline({
                 layout: pipelineLayout,
@@ -462,19 +548,26 @@ void main() {
                 usage: GPUBufferUsage.VERTEX | GPUBufferUsage.COPY_DST | GPUBufferUsage.STORAGE
             });
 
-            const computeUniformBuffer = device.createBuffer({
-                size: 4,
-                usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
-            });
+            const statefulBufSize = 4 * 3;
+            const statefulComputeBuffers = [device.createBuffer({
+                size: statefulBufSize,
+                usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.STORAGE | GPUBufferUsage.UNIFORM 
+            }), device.createBuffer({
+                size: statefulBufSize,
+                usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.STORAGE | GPUBufferUsage.UNIFORM
+            })];
 
-            const computeTessellateBindGroup = device.createBindGroup({
+            statefulComputeBuffers[0].setSubData(0, new Int32Array([0, 0, -1]));
+            statefulComputeBuffers[1].setSubData(0, new Int32Array([0, 0, -1]));
+
+            const computeTessellateBindGroups = [device.createBindGroup({
                 layout: computeBindGroupLayout,
                 bindings: [{
                     binding: 0,
                     resource: {
-                        buffer: computeUniformBuffer,
+                        buffer: statefulComputeBuffers[0],
                         offset: 0,
-                        size: 4,
+                        size: statefulBufSize,
                     },
                 }, {
                     binding: 1,
@@ -491,7 +584,106 @@ void main() {
                     size: tessellatedBuffer.byteLength,
                     },
                 }],
+            }),device.createBindGroup({
+                layout: computeBindGroupLayout,
+                bindings: [{
+                    binding: 0,
+                    resource: {
+                        buffer: statefulComputeBuffers[1],
+                        offset: 0,
+                        size: statefulBufSize,
+                    },
+                }, {
+                    binding: 1,
+                    resource: {
+                    buffer: verticesBuffer,
+                    offset: 0,
+                    size: verticesBuffer.byteLength,
+                    },
+                }, {
+                    binding: 2,
+                    resource: {
+                    buffer: tessellatedBuffer,
+                    offset: 0,
+                    size: tessellatedBuffer.byteLength,
+                    },
+                }],
+            })];
+
+            const computeIndirectBuffer = device.createBuffer({
+                size: 4 * 4,
+                usage: GPUBufferUsage.INDIRECT | GPUBufferUsage.COPY_DST | GPUBufferUsage.STORAGE,
             });
+
+            const indirectBuffer = device.createBuffer({
+                size: 4 * 4,
+                usage: GPUBufferUsage.INDIRECT | GPUBufferUsage.COPY_DST | GPUBufferUsage.STORAGE,
+            });
+
+            const statefulComputeBindGroups = [device.createBindGroup({
+                layout: statefulComputeBindGroupLayout,
+                bindings: [{
+                    binding: 0,
+                    resource: {
+                    buffer: statefulComputeBuffers[0],
+                    offset: 0,
+                    size: statefulComputeBuffers[0].byteLength,
+                    },
+                }, {
+                    binding: 1,
+                    resource: {
+                    buffer: statefulComputeBuffers[1],
+                    offset: 0,
+                    size: statefulComputeBuffers[1].byteLength,
+                    },
+                }, {
+                    binding: 2,
+                    resource: {
+                    buffer: computeIndirectBuffer,
+                    offset: 0,
+                    size: computeIndirectBuffer.byteLength,
+                    },
+                }, {
+                    binding: 3,
+                    resource: {
+                    buffer: indirectBuffer,
+                    offset: 0,
+                    size: indirectBuffer.byteLength,
+                    },
+                }],
+            }),device.createBindGroup({
+                layout: statefulComputeBindGroupLayout,
+                bindings: [{
+                    binding: 0,
+                    resource: {
+                    buffer: statefulComputeBuffers[1],
+                    offset: 0,
+                    size: statefulComputeBuffers[1].byteLength,
+                    },
+                }, {
+                    binding: 1,
+                    resource: {
+                    buffer: statefulComputeBuffers[0],
+                    offset: 0,
+                    size: statefulComputeBuffers[0].byteLength,
+                    },
+                }, {
+                    binding: 2,
+                    resource: {
+                    buffer: computeIndirectBuffer,
+                    offset: 0,
+                    size: computeIndirectBuffer.byteLength,
+                    },
+                }, {
+                    binding: 3,
+                    resource: {
+                    buffer: indirectBuffer,
+                    offset: 0,
+                    size: indirectBuffer.byteLength,
+                    },
+                }],
+            })];
+
 
             const currentlyPressedKeys = {};
 
@@ -580,33 +772,11 @@ void main() {
                 let modelViewProjectionMatrix = mat4.create();
                 mat4.multiply(modelViewProjectionMatrix, projectionMatrix, vMatrix);
                 return modelViewProjectionMatrix;
-                /*
-                let viewMatrix = mat4.create();
-                mat4.translate(viewMatrix, viewMatrix, vec3.fromValues(0, 0, -40));
-                let now = Date.now() / 1000;
-                mat4.rotate(viewMatrix, viewMatrix, Math.cos(now), vec3.fromValues(0, 1, 0));
-
-                let modelViewProjectionMatrix = mat4.create();
-                mat4.multiply(modelViewProjectionMatrix, projectionMatrix, viewMatrix);
-
-                return modelViewProjectionMatrix;*/
             }
 
             let lastTime = Date.now() / 1000;
 
-            const initialEye = vec3.clone(eyePt);
-
-            const closeLOD = 20;
-            const farLOD = 60;
-
-            let lastTessellation = -1;
-
-            const indirectBuffer = device.createBuffer({
-                size: 4 * 4,
-                usage: GPUBufferUsage.INDIRECT | GPUBufferUsage.COPY_DST,
-            });
-            
-            //bufferSubData(Int32Array, device, indirectBuffer, 0, new Int32Array([packed.length * Math.pow(4, settings.tessellation), 1, 0, 0]));
+            let statefulIdx = 0;
 
             function frame() {
                 if (curRenderIteration != window.renderIteration) {
@@ -619,39 +789,32 @@ void main() {
 
                 freecamMovement(deltaTime);
 
-                let tessellation = Math.ceil((eyePt[2] - closeLOD) / (farLOD - closeLOD) * 4);
-                if (tessellation < 0) {
-                    tessellation = 0;
-                }
-                if (tessellation > 4) {
-                    tessellation = 4;
-                }
-                tessellation = 4 - tessellation;
-                //console.log(tessellation);
-
-                if (lastTessellation != tessellation && !settings.freeze) {
-                    computeUniformBuffer.setSubData(0, new Uint32Array([tessellation]));
+                {
+                    statefulComputeBuffers[statefulIdx].setSubData(0, new Float32Array([eyePt[2]]));
+                    statefulComputeBuffers[statefulIdx].setSubData(4, new Int32Array([packed.length / 3]));
                     const commandEncoder = device.createCommandEncoder({});
+                    {
+                    const passEncoder = commandEncoder.beginComputePass();
+                    passEncoder.setPipeline(statefulComputePipeline);
+                    passEncoder.setBindGroup(0, statefulComputeBindGroups[statefulIdx]);
+                    passEncoder.dispatch(1);
+                    passEncoder.endPass();
+                    }
+                    statefulIdx = 1 - statefulIdx;
+                    {
                     const passEncoder = commandEncoder.beginComputePass();
                     passEncoder.setPipeline(computePipeline);
-                    passEncoder.setBindGroup(0, computeTessellateBindGroup);
-                    const num_tris = packed.length / 3;
-                    passEncoder.dispatch(num_tris);
+                    passEncoder.setBindGroup(0, computeTessellateBindGroups[statefulIdx]);
+                    passEncoder.dispatchIndirect(computeIndirectBuffer, 0);
                     passEncoder.endPass();
+                    }
                     device.getQueue().submit([commandEncoder.finish()]);
-            
-                    bufferSubData(Int32Array, device, indirectBuffer, 0, new Int32Array([packed.length * Math.pow(4, tessellation), 1, 0, 0]));
-
-                    lastTessellation = tessellation;
                 }
 
                 uniformBuffer.setSubData(0, getTransformationMatrix());
                 uniformBuffer.setSubData(4*16, new Float32Array([settings.displacement]));
                 renderPassDescriptor.colorAttachments[0].attachment = swapChain.getCurrentTexture().createDefaultView();
 
-                // two compute passes 
-                // 1) decide how many to tessellate and write indirect draw call
-                // 2) do tessellation all in one, dispatch = # tris
                 const commandEncoder = device.createCommandEncoder({});
                 const passEncoder = commandEncoder.beginRenderPass(renderPassDescriptor);
                 passEncoder.setPipeline(pipeline);
@@ -676,9 +839,6 @@ void main() {
         onResize();
 
     </script>
-    <!--
-    <script data-href="https://github.com/austinEng/webgpu-samples/blob/master/textured_cube.html" src="./index_files/embed.min.js"></script><a href="https://github.com/austinEng/webgpu-samples/blob/master/textured_cube.html" class="github-corner" aria-label="View source on Github"><svg width="80" height="80" viewBox="0 0 250 250" aria-hidden="true"><path d="M0,0 L115,115 L130,115 L142,142 L250,250 L250,0 Z"></path><path d="M128.3,109.0 C113.8,99.7 119.0,89.6 119.0,89.6 C122.0,82.7 120.5,78.6 120.5,78.6 C119.2,72.0 123.4,76.3 123.4,76.3 C127.3,80.9 125.5,87.3 125.5,87.3 C122.9,97.6 130.6,101.9 134.4,103.2" fill="currentColor" style="transform-origin:130px 106px;" class="octo-arm"></path><path d="M115.0,115.0 C114.9,115.1 118.7,116.5 119.8,115.4 L133.7,101.6 C136.9,99.2 139.9,98.4 142.2,98.6 C133.8,88.0 127.5,74.4 143.8,58.0 C148.5,53.4 154.0,51.2 159.7,51.0 C160.3,49.4 163.2,43.6 171.4,40.1 C171.4,40.1 176.1,42.5 178.8,56.2 C183.1,58.6 187.2,61.8 190.9,65.4 C194.5,69.0 197.7,73.2 200.1,77.6 C213.8,80.2 216.3,84.9 216.3,84.9 C212.7,93.1 206.9,96.0 205.4,96.6 C205.1,102.4 203.0,107.8 198.3,112.5 C181.9,128.9 168.3,122.5 157.7,114.1 C157.9,116.9 156.7,120.9 152.7,124.9 L141.0,136.5 C139.8,137.7 141.6,141.9 141.8,141.8 Z" fill="currentColor" class="octo-body"></path></svg></a>
-    -->
 
 
 </body></html>
