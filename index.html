@@ -268,7 +268,11 @@ void main() {
             1, 1, 0, 1, 1, 0, 0, 0,
             0, 1, 0, 0, 1, 0, 0, 0,
         ];
-        var eyePt = vec3.fromValues(0.0, -window.innerHeight / 10 / 2, window.innerWidth / 10 / 2);
+        let aspect = Math.abs(window.innerWidth / window.innerHeight);
+        var eyePt = vec3.fromValues(41, -14, 100+50 * aspect / 2);
+        eyePt[2] -= 50 * aspect / 2;
+        eyePt[1] -= 50 / 2;
+        eyePt[0] -= 30;
         var viewDir = vec3.fromValues(1.0, 0.0, 0);
         var up = vec3.fromValues(0.0, 1.0, 0.0);
         var viewPt = vec3.fromValues(0.0, 0.0, 0.0);
@@ -294,7 +298,6 @@ void main() {
         const uvOffset = 3 * 4;
         const normalOffset = 5 * 4;
 
-        let aspect = Math.abs(window.innerWidth / window.innerHeight);
         let fov = 60;
 
         const maxSlide = 24;
@@ -349,6 +352,7 @@ void main() {
             window.renderIteration++;
             const curRenderIteration = window.renderIteration;
             let packed = await loadOBJ('assets/ninjaHead_Low.obj', true);
+            let packedMonitor = await loadOBJ('assets/monitor.obj', true);
             const cubeTexture = await Utils.createTextureFromImage(device, 'assets/displacement.jpg', GPUTextureUsage.SAMPLED);
             if (curRenderIteration != window.renderIteration) {
                 return;
@@ -381,6 +385,13 @@ void main() {
                 usage: GPUBufferUsage.VERTEX | GPUBufferUsage.COPY_DST | GPUBufferUsage.STORAGE
             });
             bufferSubData(Float32Array, device, quadVerticesBuffer, 0, quadArray);
+
+            const monitorArray = new Float32Array(flatten(packedMonitor));
+            const monitorBuffer = device.createBuffer({
+                size: monitorArray.byteLength,
+                usage: GPUBufferUsage.VERTEX | GPUBufferUsage.COPY_DST | GPUBufferUsage.STORAGE
+            });
+            bufferSubData(Float32Array, device, monitorBuffer, 0, monitorArray);
 
             const bindGroupLayout = device.createBindGroupLayout({
                 bindings: [{
@@ -494,7 +505,7 @@ void main() {
 
                 rasterizationState: {
                     frontFace: 'ccw',
-                    cullMode: 'back',
+                    cullMode: 'none',
                 },
 
                 colorStates: [{
@@ -512,6 +523,10 @@ void main() {
                 usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
             });
             const planeUniformBuffer = device.createBuffer({
+                size: uniformBufferSize,
+                usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
+            });
+            const monitorUniformBuffer = device.createBuffer({
                 size: uniformBufferSize,
                 usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
             });
@@ -561,6 +576,26 @@ void main() {
                 }, {
                     binding: 2,
                     resource: cubeTexture.createDefaultView(),
+                }],
+            });
+
+            const monitorTexture = await Utils.createTextureFromImage(device, 'assets/white.png', GPUTextureUsage.SAMPLED);
+
+            const monitorBindGroup = device.createBindGroup({
+                layout: bindGroupLayout,
+                bindings: [{
+                    binding: 0,
+                    resource: {
+                        buffer: monitorUniformBuffer,
+                        offset: 0,
+                        size: uniformBufferSize,
+                    },
+                }, {
+                    binding: 1,
+                    resource: sampler,
+                }, {
+                    binding: 2,
+                    resource: monitorTexture.createDefaultView(),
                 }],
             });
 
@@ -790,11 +825,11 @@ void main() {
                 }
                 if (currentlyPressedKeys["f"]) {
                     fov += 20 * deltaTime;
-                    mat4.perspective(projectionMatrix, degToRad(fov), -aspect, 0.01, 100.0);
+                    mat4.perspective(projectionMatrix, degToRad(fov), -aspect, 0.1, 1000.0);
                 }
                 if (currentlyPressedKeys["r"]) {
                     fov -= 20 * deltaTime;
-                    mat4.perspective(projectionMatrix, degToRad(fov), -aspect, 0.01, 100.0);
+                    mat4.perspective(projectionMatrix, degToRad(fov), -aspect, 0.1, 1000.0);
                 }
 
                 // Rotate eye freely
@@ -824,15 +859,21 @@ void main() {
                 vec3.transformQuat(rightDir, rightDir, finalRot);
             }
 
-            function getTransformationMatrix(isPlane) {
+            function getTransformationMatrix(model) {
                 const vMatrix = mat4.create();
                 vec3.add(viewPt, eyePt, viewDir);
                 mat4.lookAt(vMatrix, eyePt, viewPt, up);
                 let modelViewProjectionMatrix = mat4.create();
-                if (isPlane) {
-                    mat4.translate(modelViewProjectionMatrix, modelViewProjectionMatrix, vec3.fromValues(50, 0, window.innerWidth / 10));
+                if (model=='plane') {
+                    mat4.translate(modelViewProjectionMatrix, modelViewProjectionMatrix, vec3.fromValues(41, -14, 100+50 * aspect / 2));
                     mat4.rotateY(modelViewProjectionMatrix, modelViewProjectionMatrix, degToRad(90));
-                    mat4.scale(modelViewProjectionMatrix, modelViewProjectionMatrix, vec3.fromValues(window.innerWidth / 10, window.innerHeight / 10, 1));
+                    mat4.scale(modelViewProjectionMatrix, modelViewProjectionMatrix, vec3.fromValues(50 * aspect, 50, 1));
+                }
+                if (model == 'monitor') {
+                    mat4.translate(modelViewProjectionMatrix, modelViewProjectionMatrix, vec3.fromValues(50, 0, 100));
+                    mat4.rotateY(modelViewProjectionMatrix, modelViewProjectionMatrix, degToRad(90));
+                    mat4.rotateX(modelViewProjectionMatrix, modelViewProjectionMatrix, degToRad(10));
+                    mat4.scale(modelViewProjectionMatrix, modelViewProjectionMatrix, vec3.fromValues(aspect / 1.62, 0.95, 1));
                 }
                 mat4.multiply(modelViewProjectionMatrix, vMatrix, modelViewProjectionMatrix);
                 mat4.multiply(modelViewProjectionMatrix, projectionMatrix, modelViewProjectionMatrix);
@@ -876,10 +917,12 @@ void main() {
                     device.getQueue().submit([commandEncoder.finish()]);
                 }
 
-                uniformBuffer.setSubData(0, getTransformationMatrix(false));
+                uniformBuffer.setSubData(0, getTransformationMatrix('head'));
                 uniformBuffer.setSubData(4*16, new Float32Array([settings.displacement]));
-                planeUniformBuffer.setSubData(0, getTransformationMatrix(true));
-                planeUniformBuffer.setSubData(4*16, new Float32Array([settings.displacement]));
+                planeUniformBuffer.setSubData(0, getTransformationMatrix('plane'));
+                planeUniformBuffer.setSubData(4*16, new Float32Array([0]));
+                monitorUniformBuffer.setSubData(0, getTransformationMatrix('monitor'));
+                monitorUniformBuffer.setSubData(4*16, new Float32Array([0]));
                 renderPassDescriptor.colorAttachments[0].attachment = swapChain.getCurrentTexture().createDefaultView();
 
                 {
@@ -892,6 +935,9 @@ void main() {
                     passEncoder.setBindGroup(0, planeUniformBindGroups[slide]);
                     passEncoder.setVertexBuffers(0, [quadVerticesBuffer], [0]);
                     passEncoder.draw(6, 1, 0, 0);
+                    passEncoder.setBindGroup(0, monitorBindGroup);
+                    passEncoder.setVertexBuffers(0, [monitorBuffer], [0]);
+                    passEncoder.draw(packedMonitor.length / 3, 1, 0, 0);
                     passEncoder.endPass();
                     device.getQueue().submit([commandEncoder.finish()]);
                 }
