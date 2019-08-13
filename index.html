@@ -87,6 +87,8 @@ struct Vertex {
 layout(set = 0, binding = 0) uniform Uniforms {
     float z;
     int numTriangles;
+    int frozen;
+    int requestedTessellation;
     int tessellation;
 } uniforms;
 layout(std430, set = 0, binding = 1) buffer InBufLayout {
@@ -202,12 +204,16 @@ layout(std430, set = 0, binding = 0) buffer InBufLayout {
     // Positions are overridden by caller
     float z;
     int numTriangles;
+    int frozen;
+    int requestedTessellation;
     // Tessellation is managed by the shader
     int curTessellation;
 } inBuf;
 layout(std430, set = 0, binding = 1) buffer OutBufLayout {
     float z;
     int numTriangles;
+    int frozen;
+    int requestedTessellation;
     int curTessellation;
 } outBuf;
 layout(std430, set = 0, binding = 2) buffer OutIndirectBufLayout {
@@ -244,6 +250,11 @@ void main() {
     float closeLOD = 20;
     float farLOD = 60;
     outBuf.curTessellation = 4 - int(clamp(ceil((inBuf.z - closeLOD) / (farLOD - closeLOD) * 4), 0, 4));
+
+    if (inBuf.frozen == 1) {
+        outBuf.curTessellation = inBuf.requestedTessellation;
+    }
+
     if (outBuf.curTessellation != inBuf.curTessellation) {
         outIndirectBuf.x = inBuf.numTriangles;
         outIndirectBuf.y = 1;
@@ -259,6 +270,7 @@ void main() {
     outDrawIndirectBuf.d = 0;
 }
 `
+        let fov = 60;
             
         const flatQuad = [
             0, 0, 0, 0, 0, 0, 0, 0,
@@ -272,7 +284,7 @@ void main() {
         var eyePt = vec3.fromValues(41, -14, 100+50 * aspect / 2);
         eyePt[2] -= 50 * aspect / 2;
         eyePt[1] -= 50 / 2;
-        eyePt[0] -= 30;
+        eyePt[0] -= Math.sin(degToRad(fov)) * 50;
         var viewDir = vec3.fromValues(1.0, 0.0, 0);
         var up = vec3.fromValues(0.0, 1.0, 0.0);
         var viewPt = vec3.fromValues(0.0, 0.0, 0.0);
@@ -298,8 +310,6 @@ void main() {
         const uvOffset = 3 * 4;
         const normalOffset = 5 * 4;
 
-        let fov = 60;
-
         const maxSlide = 24;
         let slide = 0;
             
@@ -311,12 +321,6 @@ void main() {
             freeze: false,
             //reuseCommandBuffers: Boolean(params.get('reuseCommandBuffers')),
         };
-        /*
-        const gui = new dat.GUI();
-        gui.add(settings, 'displacement', 0, 10);
-        gui.add(settings, 'tessellation', 0, 4).step(1).onFinishChange(init);
-        gui.add(settings, 'lines').onFinishChange(init);
-        gui.add(settings, 'freeze');*/
 
         window.renderIteration = 0;
 
@@ -455,7 +459,7 @@ void main() {
             });
 
             const pipelineLayout = device.createPipelineLayout({ bindGroupLayouts: [bindGroupLayout] });
-            const pipeline = device.createRenderPipeline({
+            const pipelineDesc = {
                 layout: pipelineLayout,
 
                 vertexStage: {
@@ -471,7 +475,7 @@ void main() {
                     entryPoint: "main"
                 },
 
-                primitiveTopology: settings.lines ? "line-list" : "triangle-list",
+                primitiveTopology: "triangle-list",
                 depthStencilState: {
                     depthWriteEnabled: true,
                     depthCompare: "less",
@@ -513,7 +517,11 @@ void main() {
                     alphaBlend: {},
                     colorBlend: {},
                 }],
-            });
+            };
+            const pipeline = device.createRenderPipeline(pipelineDesc);
+
+            pipelineDesc.primitiveTopology = 'line-list';
+            const linePipeline = device.createRenderPipeline(pipelineDesc);
 
             let uniformBufferSize = 4 * 16; // 4x4 matrix
             uniformBufferSize += 4; // displacement
@@ -629,7 +637,7 @@ void main() {
                 usage: GPUBufferUsage.VERTEX | GPUBufferUsage.COPY_DST | GPUBufferUsage.STORAGE
             });
 
-            const statefulBufSize = 4 * 3;
+            const statefulBufSize = 4 * 5;
             const statefulComputeBuffers = [device.createBuffer({
                 size: statefulBufSize,
                 usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.STORAGE | GPUBufferUsage.UNIFORM 
@@ -638,8 +646,8 @@ void main() {
                 usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.STORAGE | GPUBufferUsage.UNIFORM
             })];
 
-            statefulComputeBuffers[0].setSubData(0, new Int32Array([0, 0, -1]));
-            statefulComputeBuffers[1].setSubData(0, new Int32Array([0, 0, -1]));
+            statefulComputeBuffers[0].setSubData(0, new Int32Array([0, 0, 0, 0, -1]));
+            statefulComputeBuffers[1].setSubData(0, new Int32Array([0, 0, 0, 0, -1]));
 
             const computeTessellateBindGroups = [device.createBindGroup({
                 layout: computeBindGroupLayout,
@@ -788,6 +796,13 @@ void main() {
                         slide = maxSlide;
                     }
                 }
+                if (k == "g" && !window.gui) {
+                    window.gui = new dat.GUI();
+                    gui.add(settings, 'displacement', 0, 10);
+                    gui.add(settings, 'tessellation', 0, 4).step(1);
+                    gui.add(settings, 'freeze');
+                    gui.add(settings, 'lines');
+                }
             }
 
             // Key up watcher
@@ -883,6 +898,7 @@ void main() {
             let lastTime = Date.now() / 1000;
 
             let statefulIdx = 0;
+            let lastTessellation = -1;
 
             function frame() {
                 if (curRenderIteration != window.renderIteration) {
@@ -895,27 +911,25 @@ void main() {
 
                 freecamMovement(deltaTime);
 
-                if (!settings.freeze) {
-                    statefulComputeBuffers[statefulIdx].setSubData(0, new Float32Array([eyePt[2]]));
-                    statefulComputeBuffers[statefulIdx].setSubData(4, new Int32Array([packed.length / 3]));
-                    const commandEncoder = device.createCommandEncoder({});
-                    {
-                    const passEncoder = commandEncoder.beginComputePass();
-                    passEncoder.setPipeline(statefulComputePipeline);
-                    passEncoder.setBindGroup(0, statefulComputeBindGroups[statefulIdx]);
-                    passEncoder.dispatch(1);
-                    passEncoder.endPass();
-                    }
-                    statefulIdx = 1 - statefulIdx;
-                    {
-                    const passEncoder = commandEncoder.beginComputePass();
-                    passEncoder.setPipeline(computePipeline);
-                    passEncoder.setBindGroup(0, computeTessellateBindGroups[statefulIdx]);
-                    passEncoder.dispatchIndirect(computeIndirectBuffer, 0);
-                    passEncoder.endPass();
-                    }
-                    device.getQueue().submit([commandEncoder.finish()]);
+                statefulComputeBuffers[statefulIdx].setSubData(0, new Float32Array([eyePt[2]]));
+                statefulComputeBuffers[statefulIdx].setSubData(4, new Int32Array([packed.length / 3, settings.freeze ? 1 : 0, settings.tessellation]));
+                const commandEncoder = device.createCommandEncoder({});
+                {
+                const passEncoder = commandEncoder.beginComputePass();
+                passEncoder.setPipeline(statefulComputePipeline);
+                passEncoder.setBindGroup(0, statefulComputeBindGroups[statefulIdx]);
+                passEncoder.dispatch(1);
+                passEncoder.endPass();
                 }
+                statefulIdx = 1 - statefulIdx;
+                {
+                const passEncoder = commandEncoder.beginComputePass();
+                passEncoder.setPipeline(computePipeline);
+                passEncoder.setBindGroup(0, computeTessellateBindGroups[statefulIdx]);
+                passEncoder.dispatchIndirect(computeIndirectBuffer, 0);
+                passEncoder.endPass();
+                }
+                device.getQueue().submit([commandEncoder.finish()]);
 
                 uniformBuffer.setSubData(0, getTransformationMatrix('head'));
                 uniformBuffer.setSubData(4*16, new Float32Array([settings.displacement]));
@@ -928,7 +942,7 @@ void main() {
                 {
                     const commandEncoder = device.createCommandEncoder({});
                     const passEncoder = commandEncoder.beginRenderPass(renderPassDescriptor);
-                    passEncoder.setPipeline(pipeline);
+                    passEncoder.setPipeline(settings.lines ? linePipeline : pipeline);
                     passEncoder.setBindGroup(0, uniformBindGroup);
                     passEncoder.setVertexBuffers(0, [tessellatedBuffer], [0]);
                     passEncoder.drawIndirect(indirectBuffer, 0);
