@@ -270,6 +270,27 @@ void main() {
     outDrawIndirectBuf.d = 0;
 }
 `
+
+
+const cubeVertexShaderGLSL = `#version 450
+layout(set = 0, binding = 0) uniform Uniforms {
+    mat4 modelViewProjectionMatrix;
+} uniforms;
+layout(location = 0) in vec4 position;
+layout(location = 1) in vec4 color;
+layout(location = 0) out vec4 fragColor;
+void main() {
+    gl_Position = uniforms.modelViewProjectionMatrix * position;
+    fragColor = color;
+}
+`
+        const cubeFragmentShaderGLSL = `#version 450
+layout(location = 0) in vec4 fragColor;
+layout(location = 0) out vec4 outColor;
+void main() {
+    outColor = fragColor;
+}
+`
         let fov = 60;
             
         const flatQuad = [
@@ -280,6 +301,52 @@ void main() {
             1, 1, 0, 1, 1, 0, 0, 0,
             0, 1, 0, 0, 1, 0, 0, 0,
         ];
+        const cubeVerticesArray = new Float32Array([
+            // float4 position, float4 color
+            1, -1, 1, 1, 1, 0, 1, 1,
+            -1, -1, 1, 1, 0, 0, 1, 1,
+            -1, -1, -1, 1, 0, 0, 0, 1,
+            1, -1, -1, 1, 1, 0, 0, 1,
+            1, -1, 1, 1, 1, 0, 1, 1,
+            -1, -1, -1, 1, 0, 0, 0, 1,
+            1, 1, 1, 1, 1, 1, 1, 1,
+            1, -1, 1, 1, 1, 0, 1, 1,
+            1, -1, -1, 1, 1, 0, 0, 1,
+            1, 1, -1, 1, 1, 1, 0, 1,
+            1, 1, 1, 1, 1, 1, 1, 1,
+            1, -1, -1, 1, 1, 0, 0, 1,
+            -1, 1, 1, 1, 0, 1, 1, 1,
+            1, 1, 1, 1, 1, 1, 1, 1,
+            1, 1, -1, 1, 1, 1, 0, 1,
+            -1, 1, -1, 1, 0, 1, 0, 1,
+            -1, 1, 1, 1, 0, 1, 1, 1,
+            1, 1, -1, 1, 1, 1, 0, 1,
+            -1, -1, 1, 1, 0, 0, 1, 1,
+            -1, 1, 1, 1, 0, 1, 1, 1,
+            -1, 1, -1, 1, 0, 1, 0, 1,
+            -1, -1, -1, 1, 0, 0, 0, 1,
+            -1, -1, 1, 1, 0, 0, 1, 1,
+            -1, 1, -1, 1, 0, 1, 0, 1,
+            1, 1, 1, 1, 1, 1, 1, 1,
+            -1, 1, 1, 1, 0, 1, 1, 1,
+            -1, -1, 1, 1, 0, 0, 1, 1,
+            -1, -1, 1, 1, 0, 0, 1, 1,
+            1, -1, 1, 1, 1, 0, 1, 1,
+            1, 1, 1, 1, 1, 1, 1, 1,
+            1, -1, -1, 1, 1, 0, 0, 1,
+            -1, -1, -1, 1, 0, 0, 0, 1,
+            -1, 1, -1, 1, 0, 1, 0, 1,
+            1, 1, -1, 1, 1, 1, 0, 1,
+            1, -1, -1, 1, 1, 0, 0, 1,
+            -1, 1, -1, 1, 0, 1, 0, 1,
+        ]);
+        const triangleVerticesArray = new Float32Array([
+            // float4 position, float4 color
+            0, 0, 0, 1, 1, 0, 0, 1,
+            0, -1, 0.5, 1, 1, 0, 0, 1,
+            0, 0, 1, 1, 1, 0, 0, 1,
+        ]);
+
         let aspect = Math.abs(window.innerWidth / window.innerHeight);
         var eyePt = vec3.fromValues(41, -14, 100+50 * aspect / 2);
         eyePt[2] -= 50 * aspect / 2;
@@ -311,6 +378,8 @@ void main() {
         const normalOffset = 5 * 4;
 
         const maxSlide = 24;
+        const cubeSlide = 4;
+        const triSlide = 21;
         let slide = 0;
             
         const params = new URLSearchParams(window.location.search);
@@ -396,7 +465,18 @@ void main() {
                 usage: GPUBufferUsage.VERTEX | GPUBufferUsage.COPY_DST | GPUBufferUsage.STORAGE
             });
             bufferSubData(Float32Array, device, monitorBuffer, 0, monitorArray);
-
+            
+            const cubeBuffer = device.createBuffer({
+                size: cubeVerticesArray.byteLength,
+                usage: GPUBufferUsage.VERTEX | GPUBufferUsage.COPY_DST | GPUBufferUsage.STORAGE
+            });
+            bufferSubData(Float32Array, device, cubeBuffer, 0, cubeVerticesArray);
+            
+            const triangleBuffer = device.createBuffer({
+                size: triangleVerticesArray.byteLength * 4 * 4 * 4,
+                usage: GPUBufferUsage.VERTEX | GPUBufferUsage.COPY_DST | GPUBufferUsage.STORAGE
+            });
+            
             const bindGroupLayout = device.createBindGroupLayout({
                 bindings: [{
                     // Transform
@@ -520,6 +600,57 @@ void main() {
             };
             const pipeline = device.createRenderPipeline(pipelineDesc);
 
+            const cubePipeline = device.createRenderPipeline({
+                layout: pipelineLayout,
+                vertexStage: {
+                    module: device.createShaderModule({
+                        code: Utils.compile("v", cubeVertexShaderGLSL),
+                    }),
+                    entryPoint: "main"
+                },
+                fragmentStage: {
+                    module: device.createShaderModule({
+                        code: Utils.compile("f", cubeFragmentShaderGLSL),
+                    }),
+                    entryPoint: "main"
+                },
+                primitiveTopology: "triangle-list",
+                depthStencilState: {
+                    depthWriteEnabled: true,
+                    depthCompare: "less",
+                    format: "depth24plus-stencil8",
+                    stencilFront: {},
+                    stencilBack: {},
+                },
+                vertexInput: {
+                    indexFormat: "uint32",
+                    vertexBuffers: [{
+                        stride: vertexSize,
+                        stepMode: "vertex",
+                        attributeSet: [{
+                            // position
+                            shaderLocation: 0,
+                            offset: 0,
+                            format: "float4"
+                        }, {
+                            // color
+                            shaderLocation: 1,
+                            offset: 4*4,
+                            format: "float4"
+                        }]
+                    }],
+                },
+                rasterizationState: {
+                    frontFace: 'ccw',
+                    cullMode: 'back',
+                },
+                colorStates: [{
+                    format: "bgra8unorm",
+                    alphaBlend: {},
+                    colorBlend: {},
+                }],
+            });
+
             pipelineDesc.primitiveTopology = 'line-list';
             const linePipeline = device.createRenderPipeline(pipelineDesc);
 
@@ -535,6 +666,18 @@ void main() {
                 usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
             });
             const monitorUniformBuffer = device.createBuffer({
+                size: uniformBufferSize,
+                usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
+            });
+            const cubeUniformBufferLeft = device.createBuffer({
+                size: uniformBufferSize,
+                usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
+            });
+            const cubeUniformBufferRight = device.createBuffer({
+                size: uniformBufferSize,
+                usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
+            });
+            const triangleUniformBuffer = device.createBuffer({
                 size: uniformBufferSize,
                 usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
             });
@@ -586,6 +729,58 @@ void main() {
                     resource: cubeTexture.createDefaultView(),
                 }],
             });
+
+            const cubeBindGroups = [device.createBindGroup({
+                layout: bindGroupLayout,
+                bindings: [{
+                    binding: 0,
+                    resource: {
+                        buffer: cubeUniformBufferLeft,
+                        offset: 0,
+                        size: uniformBufferSize,
+                    },
+                }, {
+                    binding: 1,
+                    resource: sampler,
+                }, {
+                    binding: 2,
+                    resource: cubeTexture.createDefaultView(),
+                }],
+            }), device.createBindGroup({
+                layout: bindGroupLayout,
+                bindings: [{
+                    binding: 0,
+                    resource: {
+                        buffer: cubeUniformBufferRight,
+                        offset: 0,
+                        size: uniformBufferSize,
+                    },
+                }, {
+                    binding: 1,
+                    resource: sampler,
+                }, {
+                    binding: 2,
+                    resource: cubeTexture.createDefaultView(),
+                }],
+            })];
+
+            const trianglesBindGroup = device.createBindGroup({
+                layout: bindGroupLayout,
+                bindings: [{
+                    binding: 0,
+                    resource: {
+                        buffer: triangleUniformBuffer,
+                        offset: 0,
+                        size: uniformBufferSize,
+                    },
+                }, {
+                    binding: 1,
+                    resource: sampler,
+                }, {
+                    binding: 2,
+                    resource: cubeTexture.createDefaultView(),
+                }],
+            })
 
             const monitorTexture = await Utils.createTextureFromImage(device, 'assets/white.png', GPUTextureUsage.SAMPLED);
 
@@ -874,7 +1069,80 @@ void main() {
                 vec3.transformQuat(rightDir, rightDir, finalRot);
             }
 
+            let startTime = 0;
+            function genAnimatedTris() {
+                function lerp(a, b, t) {
+                    if (t < 0) {
+                        t = 0;
+                    }
+                    if (t > 1) {
+                        t = 1;
+                    }
+                    return a * (1-t) + b * t;
+                }
+                const now = Date.now() / 1000 - startTime;
+                const duration = 4;
+                const stay = 2;
+                let t = (now % (duration+stay) / duration);
+                if (t > 1) {
+                    t = 1;
+                }
+                const scaley = 0.1;
+                const scalex = scaley / 1.6;
+                const levely = [
+                    0.86, 0.415, 0.005
+                ];
+                const verts = [];
+                for (let i = 0; i < 3; i++) {
+                    const originx = 1/3 * i;
+                    const originy = levely[0];
+                    verts.push([originx, originy]);
+                    verts.push([originx + scalex, originy]);
+                    verts.push([originx + scalex / 2, originy + scaley]);
+                }
+                
+                for (let i = 0; i < 3*4; i++) {
+                    const localScaleX = lerp(scalex, scalex / 2, t*2);
+                    const localScaleY = lerp(scaley, scaley / 2, t*2);
+                    const div = lerp(0, 1/(3*4), t*2);
+                    const originx = 1/3 * Math.floor(i / 4) + div * (i % 4);
+                    const originy = lerp(levely[0], levely[1], t*2);
+                    verts.push([originx, originy]);
+                    verts.push([originx + localScaleX, originy]);
+                    verts.push([originx + localScaleX / 2, originy + localScaleY]);
+                }
+
+                for (let i = 0; i < 3*4*4; i++) {
+                    if (t < 0.5) {
+                        continue;
+                    }
+                    const localScaleX = lerp(scalex / 2, scalex / 4, t*2 - 1);
+                    const localScaleY = lerp(scaley / 2, scaley / 4, t*2 - 1);
+
+                    const div = lerp(0, 1/(3*4*4), t*2 - 1);
+                    const originx = 1/(3*4) * Math.floor(i / 4) + div * (i % 4);
+                    const originy = lerp(levely[1], levely[2], t*2 - 1);
+
+                    verts.push([originx, originy]);
+                    verts.push([originx + localScaleX, originy]);
+                    verts.push([originx + localScaleX / 2, originy + localScaleY]);
+                }
+                const packed = [];
+                for (let v of verts) {
+                    packed.push(v[0]);
+                    packed.push(v[1]);
+                    packed.push(0);
+                    packed.push(1);
+                    packed.push(0);
+                    packed.push(0);
+                    packed.push(0);
+                    packed.push(1);
+                }
+                return packed;
+            }
+
             function getTransformationMatrix(model) {
+                const now = Date.now() / 1000;
                 const vMatrix = mat4.create();
                 vec3.add(viewPt, eyePt, viewDir);
                 mat4.lookAt(vMatrix, eyePt, viewPt, up);
@@ -884,11 +1152,28 @@ void main() {
                     mat4.rotateY(modelViewProjectionMatrix, modelViewProjectionMatrix, degToRad(90));
                     mat4.scale(modelViewProjectionMatrix, modelViewProjectionMatrix, vec3.fromValues(50 * aspect, 50, 1));
                 }
-                if (model == 'monitor') {
+                else if (model == 'monitor') {
                     mat4.translate(modelViewProjectionMatrix, modelViewProjectionMatrix, vec3.fromValues(50, 0, 100));
                     mat4.rotateY(modelViewProjectionMatrix, modelViewProjectionMatrix, degToRad(90));
                     mat4.rotateX(modelViewProjectionMatrix, modelViewProjectionMatrix, degToRad(10));
                     mat4.scale(modelViewProjectionMatrix, modelViewProjectionMatrix, vec3.fromValues(aspect / 1.62, 0.95, 1));
+                }
+                else if (model == 'cuberight') {
+                    const scale = 4;
+                    mat4.translate(modelViewProjectionMatrix, modelViewProjectionMatrix, vec3.fromValues(35, -27, 100 - 10 * aspect));
+                    mat4.rotate(modelViewProjectionMatrix, modelViewProjectionMatrix, 1, vec3.fromValues(Math.sin(now), Math.cos(now), 0));
+                    mat4.scale(modelViewProjectionMatrix, modelViewProjectionMatrix, vec3.fromValues(scale, scale, scale));
+                }
+                else if (model == 'cubeleft') {
+                    const scale = 4;
+                    mat4.translate(modelViewProjectionMatrix, modelViewProjectionMatrix, vec3.fromValues(35, -27, 100 + 10 * aspect));
+                    mat4.rotate(modelViewProjectionMatrix, modelViewProjectionMatrix, 1, vec3.fromValues(Math.sin(now), Math.cos(now), 0));
+                    mat4.scale(modelViewProjectionMatrix, modelViewProjectionMatrix, vec3.fromValues(scale, scale, scale));
+                }
+                else if (model == 'triangles') {
+                    mat4.translate(modelViewProjectionMatrix, modelViewProjectionMatrix, vec3.fromValues(40, -18, 100+16.8 * aspect));
+                    mat4.rotateY(modelViewProjectionMatrix, modelViewProjectionMatrix, degToRad(90));
+                    mat4.scale(modelViewProjectionMatrix, modelViewProjectionMatrix, vec3.fromValues(40.7 * aspect, -29, 1));
                 }
                 mat4.multiply(modelViewProjectionMatrix, vMatrix, modelViewProjectionMatrix);
                 mat4.multiply(modelViewProjectionMatrix, projectionMatrix, modelViewProjectionMatrix);
@@ -937,6 +1222,9 @@ void main() {
                 planeUniformBuffer.setSubData(4*16, new Float32Array([0]));
                 monitorUniformBuffer.setSubData(0, getTransformationMatrix('monitor'));
                 monitorUniformBuffer.setSubData(4*16, new Float32Array([0]));
+                cubeUniformBufferLeft.setSubData(0, getTransformationMatrix('cubeleft'));
+                cubeUniformBufferRight.setSubData(0, getTransformationMatrix('cuberight'));
+                triangleUniformBuffer.setSubData(0, getTransformationMatrix('triangles'));
                 renderPassDescriptor.colorAttachments[0].attachment = swapChain.getCurrentTexture().createDefaultView();
 
                 {
@@ -952,6 +1240,31 @@ void main() {
                     passEncoder.setBindGroup(0, monitorBindGroup);
                     passEncoder.setVertexBuffers(0, [monitorBuffer], [0]);
                     passEncoder.draw(packedMonitor.length / 3, 1, 0, 0);
+
+                    if (slide == cubeSlide) {
+                        passEncoder.setPipeline(cubePipeline);
+                        passEncoder.setBindGroup(0, cubeBindGroups[0]);
+                        passEncoder.setVertexBuffers(0, [cubeBuffer], [0]);
+                        passEncoder.draw(36, 1, 0, 0);
+                        passEncoder.setBindGroup(0, cubeBindGroups[1]);
+                        passEncoder.setVertexBuffers(0, [cubeBuffer], [0]);
+                        passEncoder.draw(36, 1, 0, 0);
+                    }
+
+                    if (slide == triSlide) {
+                        if (startTime == 0) {
+                            startTime = Date.now() / 1000;
+                        }
+                        passEncoder.setPipeline(cubePipeline);
+                        passEncoder.setBindGroup(0, trianglesBindGroup);
+                        const packed = genAnimatedTris();
+                        bufferSubData(Float32Array, device, triangleBuffer, 0, new Float32Array(packed));
+                        passEncoder.setVertexBuffers(0, [triangleBuffer], [0]);
+                        passEncoder.draw(packed.length / 8, 1, 0, 0);
+                    } else {
+                        startTime = 0;
+                    }
+
                     passEncoder.endPass();
                     device.getQueue().submit([commandEncoder.finish()]);
                 }
