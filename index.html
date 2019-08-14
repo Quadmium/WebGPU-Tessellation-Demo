@@ -377,10 +377,11 @@ void main() {
         const uvOffset = 3 * 4;
         const normalOffset = 5 * 4;
 
-        const maxSlide = 24;
+        const maxSlide = 25;
         const cubeSlide = 4;
-        const triSlide = 21;
-        let slide = 0;
+        const triSlide = 22;
+        const otherTriSlide = 14;
+        let slide = otherTriSlide;
             
         const params = new URLSearchParams(window.location.search);
         const settings = {
@@ -1141,6 +1142,49 @@ void main() {
                 return packed;
             }
 
+            function genOtherAnimatedTris() {
+                function lerp(a, b, t) {
+                    if (t < 0) {
+                        t = 0;
+                    }
+                    if (t > 1) {
+                        t = 1;
+                    }
+                    return a * (1-t) + b * t;
+                }
+                let now = Date.now() / 1000 - startTime;
+                now = -now;
+                const speed = 1;
+                let scaley = 0.1;
+                let scalex = scaley / 1.6;
+                scaley /= 1.3;
+                scalex /= 1.3;
+
+                const verts = [];
+                const numTris = 24;
+                for (let i = 0; i < numTris; i++) {
+                    const originx = 0.4 + 0.2*Math.cos(now * speed + i / numTris * 2*Math.PI);
+                    const originy = 0.335 + 0.12*Math.sin(now * speed + i / numTris * 2*Math.PI);
+                    verts.push([originx, originy]);
+                    verts.push([originx + scalex, originy]);
+                    verts.push([originx + scalex / 2, originy + scaley]);
+                }
+                const packed = [];
+                let i = 0;
+                for (let v of verts) {
+                    packed.push(v[0]);
+                    packed.push(v[1]);
+                    packed.push(0 + i / 100.0);
+                    packed.push(1);
+                    packed.push(cubeVerticesArray[i*8 % cubeVerticesArray.length +4]);
+                    packed.push(cubeVerticesArray[i*8 % cubeVerticesArray.length +5]);
+                    packed.push(cubeVerticesArray[i*8 % cubeVerticesArray.length +6]);
+                    packed.push(1);
+                    i++;
+                }
+                return packed;
+            }
+
             function getTransformationMatrix(model) {
                 const now = Date.now() / 1000;
                 const vMatrix = mat4.create();
@@ -1258,6 +1302,17 @@ void main() {
                         passEncoder.setPipeline(cubePipeline);
                         passEncoder.setBindGroup(0, trianglesBindGroup);
                         const packed = genAnimatedTris();
+                        bufferSubData(Float32Array, device, triangleBuffer, 0, new Float32Array(packed));
+                        passEncoder.setVertexBuffers(0, [triangleBuffer], [0]);
+                        passEncoder.draw(packed.length / 8, 1, 0, 0);
+                    }
+                    else if (slide == otherTriSlide) {
+                        if (startTime == 0) {
+                            startTime = Date.now() / 1000;
+                        }
+                        passEncoder.setPipeline(cubePipeline);
+                        passEncoder.setBindGroup(0, trianglesBindGroup);
+                        const packed = genOtherAnimatedTris();
                         bufferSubData(Float32Array, device, triangleBuffer, 0, new Float32Array(packed));
                         passEncoder.setVertexBuffers(0, [triangleBuffer], [0]);
                         passEncoder.draw(packed.length / 8, 1, 0, 0);
